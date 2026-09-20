@@ -3,6 +3,48 @@
 import { useState, useEffect } from 'react';
 import { supabase } from '../../lib/supabaseClient';
 
+// ===== [เพิ่มใหม่] เกณฑ์เตือนสต๊อกเหลือน้อย =====
+const LOW_STOCK_THRESHOLD = 5;
+
+// ===== [เพิ่มใหม่] escape อักขระพิเศษของ HTML กันชื่อสินค้าที่มี < > & ทำให้ Telegram ตีความพัง =====
+const escapeHtml = (text) =>
+  String(text).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+
+// ===== [เพิ่มใหม่] สร้างข้อความแจ้งเตือนรายการขายใหม่ =====
+const buildNewOrderMessage = (item, stockAfter, timeText) =>
+  [
+    '🛍️ <b>มีรายการขายใหม่!</b>',
+    `- สินค้า: ${escapeHtml(item.name)}`,
+    `- จำนวน: ${item.quantity} ชิ้น`,
+    `- ราคารวม: ${(item.price * item.quantity).toFixed(2)} บาท`,
+    `- สต๊อกคงเหลือปัจจุบัน: ${stockAfter} ชิ้น`,
+    `- เวลา: ${timeText}`,
+  ].join('\n');
+
+// ===== [เพิ่มใหม่] สร้างข้อความเตือนภัยสต๊อกใกล้หมด =====
+const buildLowStockMessage = (item, stockAfter) =>
+  [
+    '🚨 <b>[เตือนภัย] สต๊อกสินค้าใกล้หมด!</b>',
+    `- สินค้า: ${escapeHtml(item.name)}`,
+    `- คงเหลือเพียง: ${stockAfter} ชิ้น`,
+    '⚠️ กรุณาเติมสต๊อกสินค้าด่วน!',
+  ].join('\n');
+
+// ===== [เพิ่มใหม่] ส่งข้อความไป Telegram ผ่าน Route Handler ฝั่ง Server =====
+// ห่อด้วย try/catch ทั้งก้อน: ถ้า Telegram ล่มหรือ token ผิด ระบบขายยังทำงานปกติ
+const sendTelegramNotifications = async (messages) => {
+  if (messages.length === 0) return;
+  try {
+    await fetch('/api/notify', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ messages }),
+    });
+  } catch (error) {
+    console.error('ส่งแจ้งเตือน Telegram ไม่สำเร็จ:', error);
+  }
+};
+
 export default function SellPage() {
   // รายการสินค้าทั้งหมด (ใช้เติม dropdown)
   const [products, setProducts] = useState([]);
@@ -41,7 +83,7 @@ export default function SellPage() {
 
   const selectedProduct = products.find((p) => p.id === selectedProductId);
 
-  // ยอดรวมของแถวที่กำลังจะเพิ่ม (แสดงตอนยังไม่กดเพิ่มลงตะกร้า)
+  // ยอดรวมของแถวที่กำลังจะเพิ่ม
   const pendingLineTotal =
     selectedProduct && quantity
       ? Number(selectedProduct.price) * Number(quantity)
@@ -64,7 +106,6 @@ export default function SellPage() {
       return;
     }
 
-    // เช็คว่าจำนวนที่มีในตะกร้ารวมกับที่จะเพิ่ม เกิน stock ปัจจุบันหรือไม่
     const existingInCart = cart.find((item) => item.productId === selectedProductId);
     const qtyAlreadyInCart = existingInCart ? existingInCart.quantity : 0;
     if (qtyAlreadyInCart + qty > selectedProduct.stock) {
@@ -75,7 +116,6 @@ export default function SellPage() {
     }
 
     if (existingInCart) {
-      // ถ้ามีสินค้านี้ในตะกร้าแล้ว ให้บวกจำนวนเพิ่ม
       setCart(
         cart.map((item) =>
           item.productId === selectedProductId
@@ -97,7 +137,6 @@ export default function SellPage() {
       ]);
     }
 
-    // เคลียร์ช่องเลือกสินค้า/จำนวน พร้อมรับรายการถัดไป
     setSelectedProductId('');
     setQuantity('');
   };
@@ -131,7 +170,7 @@ export default function SellPage() {
 
     setSubmitting(true);
 
-    // ดึง stock ล่าสุดของทุกสินค้าในตะกร้ามาเช็คอีกครั้ง กันกรณีข้อมูลเปลี่ยนระหว่างเปิดหน้าค้างไว้
+    // ดึง stock ล่าสุดของทุกสินค้าในตะกร้ามาเช็คอีกครั้ง
     const productIds = cart.map((item) => item.productId);
     const { data: currentProducts, error: fetchError } = await supabase
       .from('products')
@@ -144,7 +183,7 @@ export default function SellPage() {
       return;
     }
 
-    // ตรวจสอบสต็อกทุกรายการก่อน ถ้ามีรายการใดไม่พอให้หยุดทันที ไม่บันทึกอะไรเลย
+    // ตรวจสอบสต็อกทุกรายการก่อน ถ้ามีรายการใดไม่พอให้หยุดทันที
     for (const item of cart) {
       const current = currentProducts.find((p) => p.id === item.productId);
       if (!current || current.stock < item.quantity) {
@@ -157,8 +196,15 @@ export default function SellPage() {
     }
 
     const soldAt = new Date().toISOString();
+    const timeText = new Date().toLocaleString('th-TH', {
+      dateStyle: 'medium',
+      timeStyle: 'short',
+    });
 
-    // บันทึกรายการขายทีละรายการลงตาราง sales (1 แถวต่อ 1 สินค้า) และลด stock ของแต่ละสินค้า
+    // ===== [เพิ่มใหม่] เก็บข้อความแจ้งเตือนไว้ก่อน แล้วค่อยยิงทีเดียวหลังตัดสต๊อกครบ =====
+    const notifyMessages = [];
+
+    // บันทึกรายการขายและตัดสต๊อกทีละรายการ
     for (const item of cart) {
       const current = currentProducts.find((p) => p.id === item.productId);
       const lineTotal = item.price * item.quantity;
@@ -180,9 +226,12 @@ export default function SellPage() {
         return;
       }
 
+      // ===== [แก้ไข] คำนวณสต๊อกหลังตัดเก็บไว้ใช้ในข้อความแจ้งเตือน =====
+      const stockAfter = current.stock - item.quantity;
+
       const { error: updateError } = await supabase
         .from('products')
-        .update({ stock: current.stock - item.quantity })
+        .update({ stock: stockAfter })
         .eq('id', item.productId);
 
       if (updateError) {
@@ -191,9 +240,19 @@ export default function SellPage() {
         fetchProducts();
         return;
       }
+
+      // ===== [เพิ่มใหม่] งานที่ 1: ข้อความแจ้งเตือน Order ใหม่ =====
+      notifyMessages.push(buildNewOrderMessage(item, stockAfter, timeText));
+
+      // ===== [เพิ่มใหม่] งานที่ 2: ถ้าสต๊อกหลังตัด <= 5 ให้เพิ่มข้อความเตือนภัยอีก 1 ข้อความ =====
+      if (stockAfter <= LOW_STOCK_THRESHOLD) {
+        notifyMessages.push(buildLowStockMessage(item, stockAfter));
+      }
     }
 
-    // สำเร็จ: แสดงข้อความ เคลียร์ตะกร้า และโหลด stock ใหม่
+    // ===== [เพิ่มใหม่] ยิงแจ้งเตือนหลังตัดสต๊อกสำเร็จ (ไม่ await ให้บล็อกการแสดงผล) =====
+    sendTelegramNotifications(notifyMessages);
+
     setSuccessMsg(`ขายสำเร็จ ${cart.length} รายการ รวม ${cartTotal.toFixed(2)} บาท`);
     setCart([]);
     setSubmitting(false);
@@ -204,14 +263,10 @@ export default function SellPage() {
     <div>
       <h1>ขายสินค้า</h1>
 
-      {/* สรุปยอดรวมตัวใหญ่ ไว้บนสุด ให้ทั้งคนขายและลูกค้าเห็นชัด */}
+      {/* สรุปยอดรวมตัวใหญ่ ไว้บนสุด */}
       <div
         className="card"
-        style={{
-          textAlign: 'center',
-          backgroundColor: '#2563eb',
-          color: '#ffffff',
-        }}
+        style={{ textAlign: 'center', backgroundColor: '#2563eb', color: '#ffffff' }}
       >
         <div style={{ fontSize: '16px', opacity: 0.85 }}>
           ยอดรวมทั้งหมด ({cartItemCount} ชิ้น)
@@ -221,24 +276,14 @@ export default function SellPage() {
         </div>
       </div>
 
-      {errorMsg && (
-        <p style={{ color: '#dc2626', fontWeight: 500 }}>{errorMsg}</p>
-      )}
-      {successMsg && (
-        <p style={{ color: '#16a34a', fontWeight: 500 }}>{successMsg}</p>
-      )}
+      {errorMsg && <p style={{ color: '#dc2626', fontWeight: 500 }}>{errorMsg}</p>}
+      {successMsg && <p style={{ color: '#16a34a', fontWeight: 500 }}>{successMsg}</p>}
 
       {loading ? (
         <p>กำลังโหลดรายการสินค้า...</p>
       ) : (
-        <div
-          style={{
-            display: 'flex',
-            gap: '20px',
-            flexWrap: 'wrap',
-          }}
-        >
-          {/* ฝั่งซ้าย: เลือกสินค้าเพื่อเพิ่มลงตะกร้า */}
+        <div style={{ display: 'flex', gap: '20px', flexWrap: 'wrap' }}>
+          {/* ฝั่งซ้าย: เลือกสินค้า */}
           <div className="card" style={{ flex: '1 1 320px' }}>
             <h2 style={{ marginTop: 0 }}>เลือกสินค้า</h2>
 
