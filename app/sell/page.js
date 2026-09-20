@@ -6,11 +6,11 @@ import { supabase } from '../../lib/supabaseClient';
 // ===== [เพิ่มใหม่] เกณฑ์เตือนสต๊อกเหลือน้อย =====
 const LOW_STOCK_THRESHOLD = 5;
 
-// ===== [เพิ่มใหม่] escape อักขระพิเศษ กันชื่อสินค้าที่มี < > & ทำให้ Telegram parse HTML ไม่ผ่าน =====
+// ===== [เพิ่มใหม่] escape อักขระพิเศษของ HTML กันชื่อสินค้าที่มี < > & ทำให้ Telegram ตีความพัง =====
 const escapeHtml = (text) =>
   String(text).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 
-// ===== [เพิ่มใหม่] งานที่ 1: ข้อความแจ้งเตือน Order ใหม่ =====
+// ===== [เพิ่มใหม่] สร้างข้อความแจ้งเตือนรายการขายใหม่ =====
 const buildNewOrderMessage = (item, stockAfter, timeText) =>
   [
     '🛍️ <b>มีรายการขายใหม่!</b>',
@@ -21,7 +21,7 @@ const buildNewOrderMessage = (item, stockAfter, timeText) =>
     `- เวลา: ${timeText}`,
   ].join('\n');
 
-// ===== [เพิ่มใหม่] งานที่ 2: ข้อความเตือนภัยสต๊อกใกล้หมด =====
+// ===== [เพิ่มใหม่] สร้างข้อความเตือนภัยสต๊อกใกล้หมด =====
 const buildLowStockMessage = (item, stockAfter) =>
   [
     '🚨 <b>[เตือนภัย] สต๊อกสินค้าใกล้หมด!</b>',
@@ -30,7 +30,8 @@ const buildLowStockMessage = (item, stockAfter) =>
     '⚠️ กรุณาเติมสต๊อกสินค้าด่วน!',
   ].join('\n');
 
-// ===== [เพิ่มใหม่] ส่งแจ้งเตือน — ห่อ try/catch ทั้งก้อน ถ้าพังก็แค่ log ไม่กระทบระบบขาย =====
+// ===== [เพิ่มใหม่] ส่งข้อความไป Telegram ผ่าน Route Handler ฝั่ง Server =====
+// ห่อด้วย try/catch ทั้งก้อน: ถ้า Telegram ล่มหรือ token ผิด ระบบขายยังทำงานปกติ
 const sendTelegramNotifications = async (messages) => {
   if (messages.length === 0) return;
   try {
@@ -45,9 +46,11 @@ const sendTelegramNotifications = async (messages) => {
 };
 
 export default function SellPage() {
+  // รายการสินค้าทั้งหมด (ใช้เติม dropdown)
   const [products, setProducts] = useState([]);
   const [loading, setLoading] = useState(true);
 
+  // สินค้าที่กำลังเลือกจะเพิ่มลงตะกร้า
   const [selectedProductId, setSelectedProductId] = useState('');
   const [quantity, setQuantity] = useState('');
 
@@ -58,6 +61,7 @@ export default function SellPage() {
   const [successMsg, setSuccessMsg] = useState('');
   const [submitting, setSubmitting] = useState(false);
 
+  // โหลดรายการสินค้าจาก Supabase
   const fetchProducts = async () => {
     setLoading(true);
     const { data, error } = await supabase
@@ -79,15 +83,17 @@ export default function SellPage() {
 
   const selectedProduct = products.find((p) => p.id === selectedProductId);
 
+  // ยอดรวมของแถวที่กำลังจะเพิ่ม
   const pendingLineTotal =
     selectedProduct && quantity
       ? Number(selectedProduct.price) * Number(quantity)
       : 0;
 
+  // ยอดรวมทั้งตะกร้า
   const cartTotal = cart.reduce((sum, item) => sum + item.price * item.quantity, 0);
   const cartItemCount = cart.reduce((sum, item) => sum + item.quantity, 0);
 
-  // เพิ่มสินค้าลงตะกร้า (สินค้าซ้ำรวมจำนวนกัน)
+  // เพิ่มสินค้าลงตะกร้า (ถ้าสินค้าซ้ำ ให้รวมจำนวนกัน)
   const handleAddToCart = () => {
     setErrorMsg('');
     if (!selectedProductId) {
@@ -135,15 +141,19 @@ export default function SellPage() {
     setQuantity('');
   };
 
+  // ลบสินค้าออกจากตะกร้า
   const handleRemoveFromCart = (productId) => {
     setCart(cart.filter((item) => item.productId !== productId));
   };
 
+  // แก้จำนวนสินค้าในตะกร้าโดยตรง
   const handleCartQtyChange = (productId, newQty) => {
     const qty = parseInt(newQty, 10);
     setCart(
       cart.map((item) =>
-        item.productId === productId ? { ...item, quantity: qty > 0 ? qty : 1 } : item
+        item.productId === productId
+          ? { ...item, quantity: qty > 0 ? qty : 1 }
+          : item
       )
     );
   };
@@ -160,7 +170,7 @@ export default function SellPage() {
 
     setSubmitting(true);
 
-    // ดึง stock ล่าสุดมาเช็คอีกครั้ง กันข้อมูลเปลี่ยนระหว่างเปิดหน้าค้างไว้
+    // ดึง stock ล่าสุดของทุกสินค้าในตะกร้ามาเช็คอีกครั้ง
     const productIds = cart.map((item) => item.productId);
     const { data: currentProducts, error: fetchError } = await supabase
       .from('products')
@@ -173,7 +183,7 @@ export default function SellPage() {
       return;
     }
 
-    // เช็คสต๊อกทุกรายการก่อน ถ้าไม่พอแม้แต่รายการเดียว หยุดทันที ไม่บันทึกอะไรเลย
+    // ตรวจสอบสต็อกทุกรายการก่อน ถ้ามีรายการใดไม่พอให้หยุดทันที
     for (const item of cart) {
       const current = currentProducts.find((p) => p.id === item.productId);
       if (!current || current.stock < item.quantity) {
@@ -191,9 +201,10 @@ export default function SellPage() {
       timeStyle: 'short',
     });
 
-    // ===== [เพิ่มใหม่] สะสมข้อความแจ้งเตือน แล้วยิงทีเดียวหลังตัดสต๊อกครบ =====
+    // ===== [เพิ่มใหม่] เก็บข้อความแจ้งเตือนไว้ก่อน แล้วค่อยยิงทีเดียวหลังตัดสต๊อกครบ =====
     const notifyMessages = [];
 
+    // บันทึกรายการขายและตัดสต๊อกทีละรายการ
     for (const item of cart) {
       const current = currentProducts.find((p) => p.id === item.productId);
       const lineTotal = item.price * item.quantity;
@@ -215,7 +226,7 @@ export default function SellPage() {
         return;
       }
 
-      // ===== [แก้ไข] เก็บสต๊อกหลังตัดไว้ใช้ในข้อความแจ้งเตือน =====
+      // ===== [แก้ไข] คำนวณสต๊อกหลังตัดเก็บไว้ใช้ในข้อความแจ้งเตือน =====
       const stockAfter = current.stock - item.quantity;
 
       const { error: updateError } = await supabase
@@ -230,15 +241,16 @@ export default function SellPage() {
         return;
       }
 
-      // ===== [เพิ่มใหม่] แจ้งเตือนหลังตัดสต๊อกสำเร็จเท่านั้น =====
+      // ===== [เพิ่มใหม่] งานที่ 1: ข้อความแจ้งเตือน Order ใหม่ =====
       notifyMessages.push(buildNewOrderMessage(item, stockAfter, timeText));
 
+      // ===== [เพิ่มใหม่] งานที่ 2: ถ้าสต๊อกหลังตัด <= 5 ให้เพิ่มข้อความเตือนภัยอีก 1 ข้อความ =====
       if (stockAfter <= LOW_STOCK_THRESHOLD) {
         notifyMessages.push(buildLowStockMessage(item, stockAfter));
       }
     }
 
-    // ไม่ await เพื่อไม่ให้หน่วงการแสดงผล "ขายสำเร็จ"
+    // ===== [เพิ่มใหม่] ยิงแจ้งเตือนหลังตัดสต๊อกสำเร็จ (ไม่ await ให้บล็อกการแสดงผล) =====
     sendTelegramNotifications(notifyMessages);
 
     setSuccessMsg(`ขายสำเร็จ ${cart.length} รายการ รวม ${cartTotal.toFixed(2)} บาท`);
@@ -251,7 +263,7 @@ export default function SellPage() {
     <div>
       <h1>ขายสินค้า</h1>
 
-      {/* สรุปยอดรวมตัวใหญ่ไว้บนสุด */}
+      {/* สรุปยอดรวมตัวใหญ่ ไว้บนสุด */}
       <div
         className="card"
         style={{ textAlign: 'center', backgroundColor: '#2563eb', color: '#ffffff' }}
@@ -349,14 +361,12 @@ export default function SellPage() {
                       </td>
                       <td>{(item.price * item.quantity).toFixed(2)}</td>
                       <td>
-                        <div className="row-actions">
-                          <button
-                            onClick={() => handleRemoveFromCart(item.productId)}
-                            className="btn-danger"
-                          >
-                            ลบ
-                          </button>
-                        </div>
+                        <button
+                          onClick={() => handleRemoveFromCart(item.productId)}
+                          style={{ backgroundColor: '#dc2626' }}
+                        >
+                          ลบ
+                        </button>
                       </td>
                     </tr>
                   ))}
